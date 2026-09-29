@@ -30,6 +30,17 @@
  *   - 合格方案中:
  *       恒定模式:先最大化 min(pA, pB),再最小化 |TA - TB|
  *       可变模式:先最大化 min(λA, λB),再最小化 |TA - TB|
+ *
+ * 压片前时长上浮(extraSec):
+ *   - 每首曲目可录入非负的上浮秒数(缺省 0),表示压片前该曲目可能增加的时长
+ *   - 规划时对每个切点分别按两种情形重算两面:
+ *       标称情形:曲目时长 = durationSec
+ *       上浮情形:曲目时长 = durationSec + extraSec
+ *   - 只有「上浮情形」下两面都达到最小沟距安全要求的切点才能入选;
+ *     入选切点仍按「标称情形」的指标(恒定:p;可变:λ)与两面时长差优选
+ *   - 全部切点都不满足时无最优切点:标称情形即不合格的切点标记 nominal;
+ *     标称合格但上浮后某面失效的切点标记 uplift,并附上浮情形的失效原因
+ *   - 上浮值全为 0 时,两种情形数值完全一致,既有计算结果与排序保持不变
  */
 
 export type PitchMode = 'constant' | 'variable';
@@ -40,6 +51,8 @@ export interface TrackInput {
   durationSec: number;
   /** 可变沟距模式的动态系数(0.5~2);缺省按 1 处理,恒定模式下忽略 */
   coefficient?: number;
+  /** 压片前可能增加的时长(秒),非负数,缺省 0;规划时以「标称 + 上浮」再校验一遍 */
+  extraSec?: number;
 }
 
 export interface PlanParams {
@@ -133,25 +146,54 @@ export interface SideCalc {
   reasons: string[];
 }
 
+/** 一种时长情形下(标称或标称+上浮)两面的计算结果 */
+export interface ScenarioCalc {
+  sideA: SideCalc;
+  sideB: SideCalc;
+  /** 该情形下两面均满足安全要求 */
+  ok: boolean;
+  /** 该情形下较差一面的沟距:恒定 min(pA,pB)/ 可变 min(λA,λB);不合格为 null */
+  worsePitchUm: number | null;
+  /** 该情形下两面总时长差(秒);不合格为 null */
+  durationDiffSec: number | null;
+}
+
 export interface Candidate {
   /** 切点:A 面为第 1..cutAfter 首,B 面为其余 */
   cutAfter: number;
+  /** 标称情形(durationSec)下 A 面的计算结果 */
   sideA: SideCalc;
+  /** 标称情形(durationSec)下 B 面的计算结果 */
   sideB: SideCalc;
+  /** 标称情形下是否合格 */
   feasible: boolean;
-  /** 淘汰原因(合格时为空数组) */
+  /** 标称情形的淘汰原因(合格时为空数组) */
   reasons: string[];
-  /** 较差一面的沟距:恒定模式为 min(pA,pB);可变模式为 min(λA,λB)(仅合格方案) */
+  /** 标称情形下较差一面的沟距:恒定模式为 min(pA,pB);可变模式为 min(λA,λB)(仅标称合格) */
   worsePitchUm: number | null;
-  /** 两面总时长差(秒,仅合格方案) */
+  /** 标称情形下两面总时长差(秒,仅标称合格) */
   durationDiffSec: number | null;
+  /** 上浮情形(durationSec + extraSec)下两面的完整计算结果 */
+  uplift: ScenarioCalc;
+  /**
+   * 切点最终失效的阶段:
+   *  - null:标称与上浮情形均合格,可入选;
+   *  - 'nominal':标称情形本身就不满足安全要求(无需再看上浮);
+   *  - 'uplift':标称合格,但上浮后 A/B 至少一面不达标。
+   */
+  rejectedAt: 'nominal' | 'uplift' | null;
 }
 
 export interface PlanResult {
   /** 本次计算使用的沟距模式 */
   mode: PitchMode;
+  /** 是否有任意曲目录入了非 0 的上浮秒数 */
+  upliftApplied: boolean;
   candidates: Candidate[];
-  /** 最优方案切点;无合格方案时为 null */
+  /**
+   * 最优方案切点;上浮情形下两面也都合格的切点中,按标称指标与时长差优选;
+   * 无合格方案时为 null
+   */
   bestCutAfter: number | null;
 }
 
@@ -162,8 +204,11 @@ export const MIN_COEFFICIENT = 0.5;
 export const MAX_COEFFICIENT = 2;
 
 /**
- * 规范化输入:补全缺省的 mode(恒定)与动态系数(可变模式下缺省为 1)。
+ * 规范化输入:补全缺省的 mode(恒定)、动态系数(可变模式下缺省为 1)与上浮秒数(缺省为 0)。
  * 保存方案时也应使用本函数,确保持久化数据自描述。
+ *
+ * 注意:与系数缺省容错不同,extraSec 若给了非数值/NaN 则保留为 NaN,
+ * 交由 validateInputs 统一报错(无效上浮不参与计算、不保存)。
  */
 export function normalizeInputs(
   tracks: TrackInput[],
@@ -177,7 +222,9 @@ export function normalizeInputs(
           t && typeof t.coefficient === 'number' && Number.isFinite(t.coefficient)
             ? t.coefficient
             : 1;
-        return { name: t?.name, durationSec: t?.durationSec, coefficient: coeff };
+        // 缺省(undefined)补 0;一旦显式给出则原值保留,交由 validateInputs 严格校验
+        const extra = t && 'extraSec' in t ? t.extraSec : 0;
+        return { name: t?.name, durationSec: t?.durationSec, coefficient: coeff, extraSec: extra };
       })
     : [];
   return { tracks: normTracks, params: normParams };
@@ -194,6 +241,11 @@ export function validateInputs(tracks: TrackInput[], params: PlanParams): string
       }
       if (!t || !Number.isFinite(t.durationSec) || t.durationSec <= 0) {
         errors.push(`第 ${i + 1} 首曲目时长必须为正数(秒)`);
+      }
+      const extra = t?.extraSec;
+      // 缺省(undefined)视为 0;一旦显式给出,必须是非负有限数值
+      if (extra !== undefined && (typeof extra !== 'number' || !Number.isFinite(extra) || extra < 0)) {
+        errors.push(`第 ${i + 1} 首曲目的上浮秒数必须是非负有限数值`);
       }
       if (params?.mode === 'variable') {
         const c = t?.coefficient;
@@ -436,6 +488,30 @@ function calcSideVariable(sideTracks: TrackInput[], params: PlanParams, firstTra
   };
 }
 
+/** 在某一种时长情形(标称或上浮)下计算两面并汇总该情形的指标 */
+function calcScenario(
+  scenarioTracks: TrackInput[],
+  params: PlanParams,
+  calcSide: (sideTracks: TrackInput[], p: PlanParams, first: number) => SideCalc,
+  cut: number,
+): ScenarioCalc {
+  const sideA = calcSide(scenarioTracks.slice(0, cut), params, 1);
+  const sideB = calcSide(scenarioTracks.slice(cut), params, cut + 1);
+  const ok = sideA.ok && sideB.ok;
+  const mode = params.mode!;
+  return {
+    sideA,
+    sideB,
+    ok,
+    worsePitchUm: ok
+      ? mode === 'variable'
+        ? Math.min(sideA.lambdaUm!, sideB.lambdaUm!)
+        : Math.min(sideA.pitchUm!, sideB.pitchUm!)
+      : null,
+    durationDiffSec: ok ? Math.abs(sideA.totalSec - sideB.totalSec) : null,
+  };
+}
+
 export function computePlan(rawTracks: TrackInput[], rawParams: PlanParams): PlanResult {
   const { tracks, params } = normalizeInputs(rawTracks, rawParams);
   const errors = validateInputs(tracks, params);
@@ -446,33 +522,58 @@ export function computePlan(rawTracks: TrackInput[], rawParams: PlanParams): Pla
   const mode = params.mode!;
   const calcSide = mode === 'variable' ? calcSideVariable : calcSideConstant;
 
+  const upliftApplied = tracks.some((t) => (t.extraSec ?? 0) > 0);
+  // 上浮情形曲目:时长 = 标称 + 上浮;上浮全为 0 时与标称曲目相同
+  const upliftTracks = tracks.map((t) => ({
+    ...t,
+    durationSec: t.durationSec + (t.extraSec ?? 0),
+  }));
+
   const candidates: Candidate[] = [];
   for (let cut = 1; cut < tracks.length; cut++) {
-    const sideA = calcSide(tracks.slice(0, cut), params, 1);
-    const sideB = calcSide(tracks.slice(cut), params, cut + 1);
-    const feasible = sideA.ok && sideB.ok;
+    const nominal = calcScenario(tracks, params, calcSide, cut);
+    const uplift = calcScenario(upliftTracks, params, calcSide, cut);
+
+    // 只有上浮情形两面都达标的切点才能入选
+    const eligible = nominal.ok && uplift.ok;
+    // 失效阶段:标称本身不合格 → nominal;标称合格但上浮失效 → uplift
+    const rejectedAt: Candidate['rejectedAt'] = eligible
+      ? null
+      : nominal.ok
+        ? 'uplift'
+        : 'nominal';
+
+    // 标称原因保持原有表述;上浮阶段失效时,追加「上浮后」前缀的上浮情形原因
+    const reasons = [
+      ...nominal.sideA.reasons.map((r) => `A 面:${r}`),
+      ...nominal.sideB.reasons.map((r) => `B 面:${r}`),
+    ];
+    if (rejectedAt === 'uplift') {
+      reasons.push(
+        ...uplift.sideA.reasons.map((r) => `上浮后 A 面:${r}`),
+        ...uplift.sideB.reasons.map((r) => `上浮后 B 面:${r}`),
+      );
+    }
+
     candidates.push({
       cutAfter: cut,
-      sideA,
-      sideB,
-      feasible,
-      reasons: [
-        ...sideA.reasons.map((r) => `A 面:${r}`),
-        ...sideB.reasons.map((r) => `B 面:${r}`),
-      ],
-      worsePitchUm: feasible
-        ? mode === 'variable'
-          ? Math.min(sideA.lambdaUm!, sideB.lambdaUm!)
-          : Math.min(sideA.pitchUm!, sideB.pitchUm!)
-        : null,
-      durationDiffSec: feasible ? Math.abs(sideA.totalSec - sideB.totalSec) : null,
+      sideA: nominal.sideA,
+      sideB: nominal.sideB,
+      feasible: nominal.ok,
+      reasons,
+      // 标称指标仅在标称合格时有值(与旧版一致)
+      worsePitchUm: nominal.worsePitchUm,
+      durationDiffSec: nominal.durationDiffSec,
+      uplift,
+      rejectedAt,
     });
   }
 
-  // 字典序优选:① 最大化较差一面指标(恒定:沟距;可变:λ);② 最小化两面时长差
+  // 字典序优选(仅在能入选的切点之间):
+  // ① 最大化标称情形下较差一面指标(恒定:沟距;可变:λ);② 最小化标称两面时长差
   let best: Candidate | null = null;
   for (const c of candidates) {
-    if (!c.feasible) continue;
+    if (c.rejectedAt !== null) continue;
     if (!best) {
       best = c;
       continue;
@@ -486,19 +587,22 @@ export function computePlan(rawTracks: TrackInput[], rawParams: PlanParams): Pla
     }
   }
 
-  // 可变模式:合格候选按「两面较小 λ 降序、时长差升序」排列,淘汰方案附后(按切点);
-  // 恒定模式保持原有按切点顺序输出
+  // 排序:
+  //   可变模式:入选切点按标称「两面较小 λ 降序、时长差升序」排列,未入选切点附后(按切点);
+  //   恒定模式:保持原有按切点顺序输出。
+  // 上浮全为 0 时 rejectedAt 恒为 null、两情形数值相同,结果与旧版完全一致。
   let ordered = candidates;
   if (mode === 'variable') {
-    const feasibleList = candidates.filter((c) => c.feasible);
-    const rejectedList = candidates.filter((c) => !c.feasible);
-    feasibleList.sort((a, b) => {
+    const eligibleList = candidates.filter((c) => c.rejectedAt === null);
+    const rejectedList = candidates.filter((c) => c.rejectedAt !== null);
+    eligibleList.sort((a, b) => {
       const d = b.worsePitchUm! - a.worsePitchUm!;
       if (Math.abs(d) > EPS) return d;
       return a.durationDiffSec! - b.durationDiffSec!;
     });
-    ordered = [...feasibleList, ...rejectedList];
+    rejectedList.sort((a, b) => a.cutAfter - b.cutAfter);
+    ordered = [...eligibleList, ...rejectedList];
   }
 
-  return { mode, candidates: ordered, bestCutAfter: best ? best.cutAfter : null };
+  return { mode, upliftApplied, candidates: ordered, bestCutAfter: best ? best.cutAfter : null };
 }

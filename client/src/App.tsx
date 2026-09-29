@@ -66,6 +66,8 @@ export default function App() {
         p.payload.tracks.map((t) => ({
           ...t,
           coefficient: typeof t.coefficient === 'number' ? t.coefficient : 1,
+          // 旧方案没有上浮值,按 0 处理
+          extraSec: typeof t.extraSec === 'number' && Number.isFinite(t.extraSec) ? t.extraSec : 0,
         })),
       );
       setSelectedId(id);

@@ -240,6 +240,16 @@ main {
   border-color: var(--bad);
 }
 
+.extra-input {
+  max-width: 78px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.extra-input.invalid {
+  border-color: var(--bad);
+}
+
 .row-actions {
   white-space: nowrap;
 }
@@ -327,6 +337,73 @@ main {
 .candidate-summary strong {
   color: var(--text);
   font-variant-numeric: tabular-nums;
+}
+
+/* 标称 / 上浮两种情形的关键指标条 */
+.scenario-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.scenario-strip.bad {
+  border-color: rgba(209, 96, 94, 0.55);
+  background: rgba(209, 96, 94, 0.08);
+}
+
+.scenario-tag {
+  font-weight: 600;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
+.scenario-strip strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.scenario-strip .side-time {
+  color: var(--muted);
+  font-style: normal;
+  margin-left: 6px;
+  font-size: 12px;
+}
+
+.scenario-strip .side-bad strong {
+  color: var(--bad);
+}
+
+.scenario-fail {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+.reason-uplift {
+  color: var(--accent);
+}
+
+.scenario-cols {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.scenario-col-title {
+  margin: 4px 0;
+  font-size: 13px;
+  color: var(--accent);
 }
 
 .reasons {

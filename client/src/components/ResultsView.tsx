@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { Candidate, PlanResult, SideCalc } from '../types';
+import type { Candidate, PlanResult, ScenarioCalc, SideCalc } from '../types';
 import { fmt, formatDuration } from '../time';
 
 function Row({ label, children, pitch }: { label: string; children: ReactNode; pitch?: boolean }) {
@@ -118,68 +118,123 @@ function SideDetail({ label, side }: { label: string; side: SideCalc }) {
   );
 }
 
+/** 一种情形(标称 / 上浮)下两面的关键指标条 */
+function ScenarioStrip({
+  scenario,
+  variable,
+  tag,
+}: {
+  scenario: ScenarioCalc;
+  variable: boolean;
+  tag: string;
+}) {
+  const metric = (side: SideCalc) =>
+    variable ? side.lambdaUm : side.pitchUm;
+  return (
+    <div className={`scenario-strip ${scenario.ok ? 'ok' : 'bad'}`}>
+      <span className="scenario-tag">{tag}</span>
+      <span className={scenario.sideA.ok ? '' : 'side-bad'}>
+        A 面{variable ? ' λ' : '沟距'} <strong>{fmt(metric(scenario.sideA), 1, ' µm')}</strong>
+        <em className="side-time">{formatDuration(scenario.sideA.totalSec)}</em>
+      </span>
+      <span className={scenario.sideB.ok ? '' : 'side-bad'}>
+        B 面{variable ? ' λ' : '沟距'} <strong>{fmt(metric(scenario.sideB), 1, ' µm')}</strong>
+        <em className="side-time">{formatDuration(scenario.sideB.totalSec)}</em>
+      </span>
+      <span>
+        较差面{variable ? ' λ' : '沟距'} <strong>{fmt(scenario.worsePitchUm, 1, ' µm')}</strong>
+      </span>
+      <span>
+        时长差 <strong>{scenario.durationDiffSec === null ? '—' : `${scenario.durationDiffSec.toFixed(1)} 秒`}</strong>
+      </span>
+      {!scenario.ok && <span className="scenario-fail">✗ 不达标</span>}
+    </div>
+  );
+}
+
 function CandidateCard({
   candidate,
   isBest,
   mode,
+  upliftApplied,
 }: {
   candidate: Candidate;
   isBest: boolean;
   mode: PlanResult['mode'];
+  upliftApplied: boolean;
 }) {
   const c = candidate;
   const variable = mode === 'variable';
   const worseLabel = variable ? '较差面 λ' : '较差面沟距';
+  // 入选条件:标称与上浮两面均达标
+  const eligible = c.rejectedAt === null;
   return (
-    <div className={`candidate ${c.feasible ? 'feasible' : 'rejected'} ${isBest ? 'best' : ''}`}>
+    <div className={`candidate ${eligible ? 'feasible' : 'rejected'} ${isBest ? 'best' : ''}`}>
       <div className="candidate-head">
         <span className="cut">切点:第 {c.cutAfter} 首之后</span>
         {isBest && <span className="badge best-badge">★ 最优方案</span>}
-        {!c.feasible && <span className="badge reject-badge">淘汰</span>}
-        {c.feasible && !isBest && <span className="badge ok-badge">合格</span>}
+        {c.rejectedAt === 'uplift' && (
+          <span className="badge reject-badge" title="标称时长合格,但按「标称+上浮」重算后某一面低于最小沟距">
+            上浮后淘汰
+          </span>
+        )}
+        {c.rejectedAt === 'nominal' && <span className="badge reject-badge">标称即淘汰</span>}
+        {eligible && !isBest && <span className="badge ok-badge">合格</span>}
       </div>
 
-      <div className="candidate-summary">
-        {variable ? (
-          <>
-            <span>
-              A 面 λ <strong>{fmt(c.sideA.lambdaUm, 1, ' µm')}</strong>
-            </span>
-            <span>
-              B 面 λ <strong>{fmt(c.sideB.lambdaUm, 1, ' µm')}</strong>
-            </span>
-          </>
-        ) : (
-          <>
-            <span>
-              A 面沟距 <strong>{fmt(c.sideA.pitchUm, 1, ' µm')}</strong>
-            </span>
-            <span>
-              B 面沟距 <strong>{fmt(c.sideB.pitchUm, 1, ' µm')}</strong>
-            </span>
-          </>
-        )}
-        <span>
-          {worseLabel} <strong>{fmt(c.worsePitchUm, 1, ' µm')}</strong>
-        </span>
-        <span>
-          时长差 <strong>{c.durationDiffSec === null ? '—' : `${c.durationDiffSec.toFixed(1)} 秒`}</strong>
-        </span>
-      </div>
+      <ScenarioStrip
+        scenario={{
+          sideA: c.sideA,
+          sideB: c.sideB,
+          ok: c.feasible,
+          worsePitchUm: c.worsePitchUm,
+          durationDiffSec: c.durationDiffSec,
+        }}
+        variable={variable}
+        tag="标称"
+      />
+      {upliftApplied && <ScenarioStrip scenario={c.uplift} variable={variable} tag="标称+上浮" />}
+
+      {eligible && (
+        <div className="candidate-summary">
+          <span>
+            {worseLabel}(用于优选) <strong>{fmt(c.worsePitchUm, 1, ' µm')}</strong>
+          </span>
+          <span>
+            时长差 <strong>{c.durationDiffSec === null ? '—' : `${c.durationDiffSec.toFixed(1)} 秒`}</strong>
+          </span>
+        </div>
+      )}
 
       {c.reasons.length > 0 && (
         <ul className="reasons">
           {c.reasons.map((r, i) => (
-            <li key={i}>{r}</li>
+            <li key={i} className={r.startsWith('上浮后') ? 'reason-uplift' : undefined}>
+              {r}
+            </li>
           ))}
         </ul>
       )}
 
       <details>
-        <summary>计算明细</summary>
-        <div className="sides">
-          <SideDetail label="A 面" side={c.sideA} />
-          <SideDetail label="B 面" side={c.sideB} />
+        <summary>计算明细{upliftApplied ? '(标称 / 上浮两种情形)':''}</summary>
+        <div className="scenario-cols">
+          <div className="scenario-col">
+            <h5 className="scenario-col-title">标称时长</h5>
+            <div className="sides">
+              <SideDetail label="A 面" side={c.sideA} />
+              <SideDetail label="B 面" side={c.sideB} />
+            </div>
+          </div>
+          {upliftApplied && (
+            <div className="scenario-col">
+              <h5 className="scenario-col-title">标称 + 上浮</h5>
+              <div className="sides">
+                <SideDetail label="A 面" side={c.uplift.sideA} />
+                <SideDetail label="B 面" side={c.uplift.sideB} />
+              </div>
+            </div>
+          )}
         </div>
       </details>
     </div>
@@ -187,21 +242,30 @@ function CandidateCard({
 }
 
 export default function ResultsView({ result }: { result: PlanResult }) {
-  const feasibleCount = result.candidates.filter((c) => c.feasible).length;
   const variable = result.mode === 'variable';
+  const eligibleCount = result.candidates.filter((c) => c.rejectedAt === null).length;
+  const nominalRejected = result.candidates.filter((c) => c.rejectedAt === 'nominal');
+  const upliftRejected = result.candidates.filter((c) => c.rejectedAt === 'uplift');
   return (
     <section className="panel results">
       <h2>
-        候选切点({result.candidates.length} 个,合格 {feasibleCount} 个)
+        候选切点({result.candidates.length} 个,入选 {eligibleCount} 个)
         <small className="mode-tag">{variable ? '可变沟距模式' : '恒定沟距模式'}</small>
       </h2>
 
       {result.bestCutAfter !== null ? (
         <div className="best-banner">
           最优切点:第 <strong>{result.bestCutAfter}</strong> 首之后 ——
-          {variable
-            ? '先最大化两面较小 λ,再最小化两面时长差'
-            : '先最大化较差一面沟距,再最小化两面时长差'}
+          {result.upliftApplied
+            ? '该切点在「标称 + 上浮」情形下两面仍达标;再按标称指标(先最大化较差一面沟距/λ,再最小化两面时长差)优选'
+            : variable
+              ? '先最大化两面较小 λ,再最小化两面时长差'
+              : '先最大化较差一面沟距,再最小化两面时长差'}
+        </div>
+      ) : result.upliftApplied ? (
+        <div className="best-banner none">
+          没有可入选切点:标称即不合格 {nominalRejected.length} 个,标称合格但上浮后某面失效{' '}
+          {upliftRejected.length} 个。可放宽最小沟距、减小留白/上浮秒数或扩大有效半径范围。
         </div>
       ) : (
         <div className="best-banner none">
@@ -215,6 +279,7 @@ export default function ResultsView({ result }: { result: PlanResult }) {
           candidate={c}
           isBest={c.cutAfter === result.bestCutAfter}
           mode={result.mode}
+          upliftApplied={result.upliftApplied}
         />
       ))}
     </section>

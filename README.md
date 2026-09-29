@@ -1,11 +1,13 @@
 # 黑胶唱片分面规划(Vinyl Side-Split Planner)
 
-录入按顺序排列的曲目时长、每首曲目的动态系数与刻录参数,系统自动枚举所有 A/B 面切点,支持两种沟距模式:
+录入按顺序排列的曲目时长、每首曲目的动态系数、**压片前可能增加的时长(上浮秒数)**与刻录参数,系统自动枚举所有 A/B 面切点,支持两种沟距模式:
 
 - **恒定沟距模式**(原行为):每面使用统一沟距,淘汰低于安全阈值的方案;
 - **可变沟距模式(新)**:每首曲目可录入 0.5~2 的动态系数,求该面不超过可用径向宽度的最大基准 λ,每轨实际沟距为 `max(最小沟距, λ × 动态系数)`,并展示每轨从外圈向内的起止半径。
 
 候选按「先最大化较差一面指标(恒定:沟距 p;可变:λ),再最小化两面时长差」的字典序规则选出最优切点。页面展示每个候选切点的完整计算明细与淘汰原因。
+
+**压片前时长上浮(本轮新增)**:每首曲目可录入非负的上浮秒数 `extraSec`(缺省 0)。规划时对每个切点分别按「标称时长」与「标称 + 上浮」两种情形重算两面;**只有上浮情形两面仍达到现有最小沟距安全要求的切点才能入选**,入选切点仍按标称指标与两面时长差优选。全部切点都不合格时无最优切点,并区分切点是「标称即不合格(nominal)」还是「标称合格但上浮后某面失效(uplift)」。上浮值全为 0 时计算结果与排序和旧版完全一致;无效或非有限上浮值直接报错,不保存也不返回部分规划结果。
 
 技术栈:React + TypeScript(Vite)/ Node.js(Express)/ SQLite(better-sqlite3),Docker Compose 一键启动。
 
@@ -71,6 +73,23 @@
 
 - **恒定模式**:合格方案按切点顺序展示;最优 = 最大化 `min(pA, pB)`,并列时最小化 `|TA − TB|`。
 - **可变模式**:合格方案按 `min(λA, λB)` 降序排列(并列再按 `|TA − TB|` 升序),淘汰方案附后;最优即列表第一项。
+
+### 压片前时长上浮(extraSec)
+
+每首曲目除标称时长 `durationSec` 外,可录入非负上浮秒数 `extraSec`(缺省 0)。对每个切点:
+
+1. **标称情形**:曲目时长取 `durationSec`,按上述两种模式之一计算 A/B 两面(记为 `sideA`/`sideB`);
+2. **上浮情形**:曲目时长取 `durationSec + extraSec`,同样重算 A/B 两面(记为 `uplift.sideA`/`uplift.sideB`)。
+
+判定与优选:
+
+- **入选门槛**:上浮情形 A、B 两面都达到现有最小沟距安全要求(与标称同一套安全约束)。标称本身不合格的切点记为 `rejectedAt = "nominal"`;标称合格但上浮后某面失效的切点记为 `rejectedAt = "uplift"`,并在 `reasons` 中追加带「上浮后 A/B 面:」前缀的失效原因。
+- **优选规则**:入选切点仍完全按**标称情形**的指标排序——先最大化较差一面指标(恒定 `min(pA,pB)`、可变 `min(λA,λB)`),再最小化两面时长差。上浮情形只用于安全门槛,不改变指标口径。
+- **无最优切点**:`bestCutAfter = null`。可能全部是 nominal(原本就不合格),也可能混有 uplift(标称合格、上浮后失效),页面与 API 均逐切点给出归属。
+- **全 0 兼容**:`extraSec` 全为 0 时 `upliftApplied = false`,两情形数值逐项相同,最优切点、候选顺序与旧版完全一致。
+- **非法输入**:上浮值为负数、NaN、Infinity 或非数值时,`/api/plan` 与保存接口都返回 400 且不写入、不返回任何部分规划结果。
+
+页面在每个切点卡片上并排展示「标称」与「标称+上浮」两条关键指标条(两面沟距/λ、各面总时长、较差面指标、时长差、是否达标),计算明细中也分两种情形给出完整两面数据。
 
 ## 快速开始(Docker)
 
@@ -139,8 +158,8 @@ STATIC_DIR=../client/dist npm start
     "minPitchUm": 80
   },
   "tracks": [
-    { "name": "第一首", "durationSec": 312, "coefficient": 1.3 },
-    { "name": "第二首", "durationSec": 245, "coefficient": 0.7 }
+    { "name": "第一首", "durationSec": 312, "coefficient": 1.3, "extraSec": 20 },
+    { "name": "第二首", "durationSec": 245, "coefficient": 0.7, "extraSec": 0 }
   ]
 }
 ```
@@ -149,7 +168,13 @@ STATIC_DIR=../client/dist npm start
 
 - `mode` 缺省为 `"constant"`(恒定沟距,与旧版完全兼容);`"variable"` 为可变沟距。
 - 可变模式下每首曲目需要 `coefficient`(0.5~2),缺省按 1;恒定模式忽略该字段。
-- 保存/加载完整保留模式与动态系数;旧版保存的方案加载时自动补全为恒定模式、系数 1。
+- 每首曲目可选 `extraSec`(压片前上浮秒数):**非负有限数**,缺省按 0;两种模式都生效。负数、`NaN`、`Infinity` 或非数值都会被拒绝(HTTP 400)。
+- 保存/加载完整保留模式、动态系数与上浮秒数;旧版保存的方案加载时自动补全为恒定模式、系数 1、上浮 0。
+
+`POST /api/plan` 返回结构在原有字段上新增:
+
+- 顶层 `upliftApplied`:是否有任意曲目 `extraSec > 0`;
+- 每个候选切点新增 `rejectedAt`(`null` 可入选 / `"nominal"` 标称即不合格 / `"uplift"` 上浮后失效)与 `uplift`(上浮情形下 `sideA`、`sideB`、`ok`、`worsePitchUm`、`durationDiffSec`)。
 
 示例:
 
@@ -163,6 +188,24 @@ curl -X POST http://localhost:8080/api/plan \
 curl -X POST http://localhost:8080/api/plan \
   -H 'Content-Type: application/json' \
   -d @sample/sample-album-variable.json
+
+# 含压片前上浮秒数的示例(标称 + 上浮 两种情形都会计算)
+curl -X POST http://localhost:8080/api/plan \
+  -H 'Content-Type: application/json' \
+  -d @sample/sample-album-uplift.json
+
+# 上浮秒数非法 → 400,不返回规划结果
+curl -i -X POST http://localhost:8080/api/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"params":{"rpm":33.333,"outerRadiusMm":146,"innerRadiusMm":60,"gapWidthMm":1.2,"minPitchUm":80},
+       "tracks":[{"name":"a","durationSec":180,"extraSec":-5},{"name":"b","durationSec":200}]}'
+# HTTP/1.1 400 Bad Request
+# {"error":"第 1 首曲目的上浮秒数必须是非负有限数值"}
+
+# 保存含上浮的方案(同样校验非法值)
+curl -X POST http://localhost:8080/api/projects \
+  -H 'Content-Type: application/json' \
+  -d @sample/sample-album-uplift.json
 ```
 
 ## 目录结构
@@ -172,14 +215,15 @@ curl -X POST http://localhost:8080/api/plan \
 ├── docker-compose.yml      # 一键启动,访问 http://localhost:8080
 ├── sample/
 │   ├── sample-album.json           # 恒定沟距示例(与服务端内置种子一致)
-│   └── sample-album-variable.json  # 可变沟距示例(含每首动态系数)
+│   ├── sample-album-variable.json  # 可变沟距示例(含每首动态系数)
+│   └── sample-album-uplift.json    # 含压片前上浮秒数的示例
 ├── server/                 # Express + better-sqlite3
-│   ├── src/planner.ts      # 核心规划算法(纯函数,两种模式)
+│   ├── src/planner.ts      # 核心规划算法(纯函数,两种模式 × 标称/上浮两情形)
 │   ├── src/db.ts           # SQLite 持久化 + 启动种子 + 旧数据兼容
 │   ├── src/index.ts        # HTTP API + 静态托管
 │   └── test/planner.test.ts
 └── client/                 # React + TypeScript (Vite)
-    └── src/components/     # 参数表单(模式切换)/ 曲目编辑(系数列)/ 结果明细(每轨布局)
+    └── src/components/     # 参数表单(模式切换)/ 曲目编辑(系数列、上浮列)/ 结果明细(两情形指标)
 ```
 
 ## 环境变量
