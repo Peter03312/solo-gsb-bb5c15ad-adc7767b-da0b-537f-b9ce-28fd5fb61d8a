@@ -1,0 +1,16 @@
+services:
+  vinyl-planner:
+    build: .
+    image: vinyl-planner
+    container_name: vinyl-planner
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      # DB_PATH: /app/data/vinyl.db   # 默认值,可覆盖
+    volumes:
+      - vinyl-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  vinyl-data:

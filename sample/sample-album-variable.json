@@ -1,0 +1,23 @@
+{
+  "name": "示例:概念专辑《Spiral》(可变沟距)",
+  "params": {
+    "mode": "variable",
+    "rpm": 33.333,
+    "outerRadiusMm": 146,
+    "innerRadiusMm": 60,
+    "gapWidthMm": 1.2,
+    "minPitchUm": 80
+  },
+  "tracks": [
+    { "name": "序曲 Overture", "durationSec": 312, "coefficient": 1.3 },
+    { "name": "霓虹航道", "durationSec": 245, "coefficient": 1.1 },
+    { "name": "慢速旋转", "durationSec": 198, "coefficient": 0.7 },
+    { "name": "沟槽之间", "durationSec": 167, "coefficient": 0.8 },
+    { "name": "半径之外", "durationSec": 284, "coefficient": 1.4 },
+    { "name": "留白", "durationSec": 176, "coefficient": 0.6 },
+    { "name": "内圈回声", "durationSec": 233, "coefficient": 0.9 },
+    { "name": "四十五转", "durationSec": 205, "coefficient": 1.0 },
+    { "name": "静噪", "durationSec": 149, "coefficient": 0.5 },
+    { "name": "终曲:归位", "durationSec": 368, "coefficient": 1.6 }
+  ]
+}
